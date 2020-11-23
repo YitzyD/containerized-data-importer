@@ -220,6 +220,92 @@ func addDatavolumeControllerWatches(mgr manager.Manager, datavolumeController co
 	return nil
 }
 
+const AnnCSICloneCapable = "k8s.io/CSICloneVolume"
+const AnnCSICloneRequest = "k8s.io/CSICloneRequest"
+
+func (r *DatavolumeReconciler) isCSICloneCapable(dv *cdiv1.DataVolume) (bool, error) {
+		r.log.Info("We here1")
+		if (dv.Spec.Source.PVC == nil) {
+			return false, nil
+		}
+		
+		r.log.Info("We here2")
+		sourcePvcNs := dv.Spec.Source.PVC.Namespace
+		if sourcePvcNs == "" {
+			sourcePvcNs = dv.Namespace
+		}
+		r.log.Info("We here3")
+		sourcePvc := &corev1.PersistentVolumeClaim{}
+		if err := r.client.Get(context.TODO(), types.NamespacedName{Namespace: sourcePvcNs, Name: dv.Spec.Source.PVC.Name}, sourcePvc); err != nil {
+			if k8serrors.IsNotFound(err) {
+				r.log.V(3).Info("Source PVC is missing", "source namespace", dv.Spec.Source.PVC.Namespace, "source name", dv.Spec.Source.PVC.Name)			
+				return false, errors.New("source PVC not found")
+			}
+		}
+		r.log.Info("We here4")
+		sourcePvcStorageClassName := sourcePvc.Spec.StorageClassName
+		targetStorageClass, err := GetStorageClassByName(r.client, dv.Spec.PVC.StorageClassName)
+		if(err != nil) {
+			return false, err
+		}
+		
+		r.log.Info("We here5")
+		if (*targetStorageClass).Name != *sourcePvcStorageClassName {
+			r.log.V(3).Info("Source PVC and target PVC belong to different storage classes", "source storage class",
+			*sourcePvcStorageClassName, "target storage class", (*targetStorageClass).Name)
+			return false, nil
+		}
+		
+		r.log.Info("We here5")
+		ann := targetStorageClass.Annotations[AnnCSICloneCapable]
+		if s, err := strconv.ParseBool(ann); s && err == nil {
+			return true, nil
+		}
+		r.log.Info("We here6")
+		r.log.Info(ann)
+
+		return false, nil
+}
+
+func newVolumeClonePVC(dv *cdiv1.DataVolume, pvcStorageClassName string, pvcAccessModes []corev1.PersistentVolumeAccessMode) *corev1.PersistentVolumeClaim {
+	annotations := make(map[string]string)
+	annotations[AnnCSICloneRequest] = "true"
+	labels := map[string]string{
+		common.CDILabelKey:       common.CDILabelValue,
+		common.CDIComponentLabel: common.CSICloneCDILabel,
+	}
+
+	pvc := corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta {
+			Name: dv.Name,
+			Namespace: dv.Spec.Source.PVC.Namespace,
+			Labels: labels,
+			Annotations: annotations,
+			OwnerReferences: []metav1.OwnerReference{
+				*metav1.NewControllerRef(dv, schema.GroupVersionKind{
+					Group:   cdiv1.SchemeGroupVersion.Group,
+					Version: cdiv1.SchemeGroupVersion.Version,
+					Kind:    "DataVolume",
+				}),
+			},
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			StorageClassName: &pvcStorageClassName,
+			DataSource: &corev1.TypedLocalObjectReference{
+				Name: dv.Spec.Source.PVC.Name,
+				Kind: "PersistentVolumeClaim",
+			},
+			AccessModes: pvcAccessModes,
+			Resources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceStorage: *dv.Spec.PVC.Resources.Requests.Storage(),
+				},
+			},
+		},
+	}
+	return &pvc
+}
+
 // Reconcile the reconcile loop for the data volumes.
 func (r *DatavolumeReconciler) Reconcile(req reconcile.Request) (reconcile.Result, error) {
 	log := r.log.WithValues("Datavolume", req.NamespacedName)
@@ -272,6 +358,32 @@ func (r *DatavolumeReconciler) Reconcile(req reconcile.Request) (reconcile.Resul
 	}
 
 	if !pvcExists {
+		isCap, err := r.isCSICloneCapable(datavolume)
+		if(isCap && err == nil && datavolume.Spec.PVC != nil) {
+			log.Info("CSI")
+			// Do CSI Clone PVC setup stuff
+			// need additionally checks to make sure everything is in order s/a storageclass match[done], size target >= source[ ], etc.
+			// Create PVC in source namespace
+			
+			sourcePvcNs := datavolume.Spec.Source.PVC.Namespace
+			if sourcePvcNs == "" {
+				sourcePvcNs = datavolume.Namespace
+			}
+			sourcePvc := &corev1.PersistentVolumeClaim{}
+			_ = r.client.Get(context.TODO(), types.NamespacedName{Namespace: sourcePvcNs, Name: datavolume.Spec.Source.PVC.Name}, sourcePvc)
+
+			pvc := newVolumeClonePVC(datavolume, *sourcePvc.Spec.StorageClassName, sourcePvc.Spec.AccessModes)
+			log.Info("YO")
+			log.Info(fmt.Sprintf("%+v", pvc))
+			if err := r.client.Create(context.TODO(), pvc); err != nil {
+				if k8serrors.IsAlreadyExists(err) {
+					return reconcile.Result{}, nil
+				}
+				return reconcile.Result{}, err
+			}
+			return reconcile.Result{}, r.updateSmartCloneStatusPhase("csiCloneInProgress", datavolume)	
+		}
+
 		snapshotClassName, err := r.getSnapshotClassForSmartClone(datavolume)
 		if err == nil {
 			r.log.V(3).Info("Smart-Clone via Snapshot is available with Volume Snapshot Class", "snapshotClassName", snapshotClassName)
