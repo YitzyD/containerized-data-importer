@@ -221,7 +221,6 @@ func addDatavolumeControllerWatches(mgr manager.Manager, datavolumeController co
 }
 
 const AnnCSICloneCapable = "k8s.io/CSICloneVolume"
-const AnnCSICloneRequest = "k8s.io/CSICloneRequest"
 
 func (r *DatavolumeReconciler) isCSICloneCapable(dv *cdiv1.DataVolume) (bool, error) {
 		r.log.Info("We here1")
@@ -270,6 +269,7 @@ func (r *DatavolumeReconciler) isCSICloneCapable(dv *cdiv1.DataVolume) (bool, er
 func newVolumeClonePVC(dv *cdiv1.DataVolume, pvcStorageClassName string, pvcAccessModes []corev1.PersistentVolumeAccessMode) *corev1.PersistentVolumeClaim {
 	annotations := make(map[string]string)
 	annotations[AnnCSICloneRequest] = "true"
+	annotations[AnnCSICloneSource] = "true"
 	labels := map[string]string{
 		common.CDILabelKey:       common.CDILabelValue,
 		common.CDIComponentLabel: common.CSICloneCDILabel,
@@ -277,7 +277,7 @@ func newVolumeClonePVC(dv *cdiv1.DataVolume, pvcStorageClassName string, pvcAcce
 
 	pvc := corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta {
-			Name: dv.Name,
+			Name: dv.Name, //Make name random and annotate dv with this associated clone pvc maybe? otherwise name clashes maybe?
 			Namespace: dv.Spec.Source.PVC.Namespace,
 			Labels: labels,
 			Annotations: annotations,
@@ -381,7 +381,7 @@ func (r *DatavolumeReconciler) Reconcile(req reconcile.Request) (reconcile.Resul
 				}
 				return reconcile.Result{}, err
 			}
-			return reconcile.Result{}, r.updateSmartCloneStatusPhase("csiCloneInProgress", datavolume)	
+			return reconcile.Result{}, nil //r.updateSmartCloneStatusPhase("csiCloneInProgress", datavolume)	//set phase csicloneinprogress to const in cdiv1 and make own update thing
 		}
 
 		snapshotClassName, err := r.getSnapshotClassForSmartClone(datavolume)
