@@ -2,18 +2,18 @@ package controller
 
 import (
 	"context"
+	"reflect"
 	"strconv"
-	// "fmt"
-	// "reflect"
 
 	"github.com/go-logr/logr"
-	// "github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
-	// "k8s.io/apimachinery/pkg/api/meta"
-	// metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	// "k8s.io/apimachinery/pkg/types"
+	ref "k8s.io/client-go/tools/reference"
+
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -25,12 +25,22 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	cdiv1 "kubevirt.io/containerized-data-importer/pkg/apis/core/v1beta1"
-	// "kubevirt.io/containerized-data-importer/pkg/common"
 )
 
-const AnnCSICloneRequest = "k8s.io/CSICloneRequest"
-const AnnCSICloneSource = "k8s.io/CSICloneSource"
-const AnnCSICloneTarget = "k8s.io/CSICloneTarget"
+const (
+	AnnCSICloneRequest     = "cdi.kubevirt.io/CSICloneRequest"
+	AnnCSICloneDVNamespace = "cdi.kubevirt.io/CSICloneDVNamespace"
+	AnnCSICloneSource      = "cdi.kubevirt.io/CSICloneSource"
+	AnnCSICloneTarget      = "cdi.kubevirt.io/CSICloneTarget"
+	AnnCSICloneCapable     = "cdi.kubevirt.io/CSICloneVolumeCapable"
+)
+
+type CSIClonePVCType string
+
+const (
+	CSICloneSourcePVC CSIClonePVCType = AnnCSICloneSource
+	CSICloneTargetPVC CSIClonePVCType = AnnCSICloneTarget
+)
 
 type CSICloneReconciler struct {
 	client   client.Client
@@ -43,8 +53,8 @@ func NewCSICloneController(mgr manager.Manager, log logr.Logger) (controller.Con
 	reconciler := &CSICloneReconciler{
 		client:   mgr.GetClient(),
 		scheme:   mgr.GetScheme(),
-		log:      log.WithName("smartclone-controller"),
-		recorder: mgr.GetEventRecorderFor("smartclone-controller"),
+		log:      log.WithName("csiclone-controller"),
+		recorder: mgr.GetEventRecorderFor("csiclone-controller"),
 	}
 	csiCloneController, err := controller.New("csiclone-controller", mgr, controller.Options{
 		Reconciler: reconciler,
@@ -62,11 +72,8 @@ func addCSICloneControllerWatches(mgr manager.Manager, csiCloneController contro
 	if err := cdiv1.AddToScheme(mgr.GetScheme()); err != nil {
 		return err
 	}
-	// Setup watches
-	if err := csiCloneController.Watch(&source.Kind{Type: &corev1.PersistentVolumeClaim{}}, &handler.EnqueueRequestForOwner{
-		OwnerType:    &cdiv1.DataVolume{},
-		IsController: true,
-	}, predicate.Funcs{
+
+	if err := csiCloneController.Watch(&source.Kind{Type: &corev1.PersistentVolumeClaim{}}, &handler.EnqueueRequestForObject{}, predicate.Funcs{
 		CreateFunc: func(e event.CreateEvent) bool {
 			return shouldReconcileCSIClonePvc(e.Object.(*corev1.PersistentVolumeClaim))
 		},
@@ -82,6 +89,7 @@ func addCSICloneControllerWatches(mgr manager.Manager, csiCloneController contro
 	}); err != nil {
 		return err
 	}
+
 	return nil
 }
 
@@ -94,10 +102,10 @@ func shouldReconcileCSIClonePvc(pvc *corev1.PersistentVolumeClaim) bool {
 	return ok && val == "true"
 }
 
-// Reconcile the reconcile loop for smart cloning.
+// Reconcile the reconcile loop for csi cloning.
 func (r *CSICloneReconciler) Reconcile(req reconcile.Request) (reconcile.Result, error) {
-	log := r.log.WithValues("Datavolume", req.NamespacedName)
-	log.Info("reconciling CSI clone")
+	log := r.log.WithValues("PVC", req.NamespacedName)
+	log.Info("reconciling csi clone")
 	pvc := &corev1.PersistentVolumeClaim{}
 	if err := r.client.Get(context.TODO(), req.NamespacedName, pvc); err != nil {
 		if k8serrors.IsNotFound(err) {
@@ -106,105 +114,105 @@ func (r *CSICloneReconciler) Reconcile(req reconcile.Request) (reconcile.Result,
 		return reconcile.Result{}, err
 	}
 	isCloneSource := pvc.Annotations[AnnCSICloneSource]
-	// isCloneTarget := pvc.Annotations[AnnCSICloneTarget]
+	isCloneTarget := pvc.Annotations[AnnCSICloneTarget]
 
 	if s, err := strconv.ParseBool(isCloneSource); s && err == nil {
 		return r.reconcileSourcePvc(log, pvc)
+	}
+
+	if s, err := strconv.ParseBool(isCloneTarget); s && err == nil {
+		return r.reconcileTargetPVC(log, pvc)
 	}
 
 	return reconcile.Result{}, nil
 }
 
 func (r *CSICloneReconciler) reconcileSourcePvc(log logr.Logger, pvc *corev1.PersistentVolumeClaim) (reconcile.Result, error) {
-	if(pvc.Status.Phase == corev1.ClaimBound) {
-		log.Info("PVC WAS BOUND")
-		// Set PV of PVC to retain
-		// Delete this PVC
-		// Create target PVC with volume set to copied PV
-		// Set PV to original policy
+	if pvc.Status.Phase == corev1.ClaimBound {
+		pv := &corev1.PersistentVolume{}
+		if err := r.client.Get(context.TODO(), types.NamespacedName{Name: pvc.Spec.VolumeName}, pv); err != nil {
+			if k8serrors.IsNotFound(err) {
+				return reconcile.Result{}, nil
+			}
+			return reconcile.Result{}, err
+		}
+
+		dv := &cdiv1.DataVolume{}
+		if err := r.client.Get(context.TODO(), types.NamespacedName{Name: metav1.GetControllerOf(pvc).Name, Namespace: pvc.Annotations[AnnCSICloneDVNamespace]}, dv); err != nil {
+			return reconcile.Result{}, err
+		}
+
+		targetClonerPvc := NewVolumeClonePVC(dv, *pvc.Spec.StorageClassName, pvc.Spec.AccessModes, CSICloneTargetPVC)
+
+		targetClonerPvc.Spec.VolumeName = pv.Name
+
+		if err := r.client.Create(context.TODO(), targetClonerPvc); err != nil {
+			if k8serrors.IsAlreadyExists(err) {
+				return reconcile.Result{}, nil
+			}
+			return reconcile.Result{}, err
+		}
+
+		claimRef, err := ref.GetReference(r.scheme, targetClonerPvc)
+		if err != nil {
+			return reconcile.Result{}, err
+		}
+
+		pv.Spec.ClaimRef = claimRef
+		if err := r.client.Update(context.TODO(), pv); err != nil {
+			return reconcile.Result{}, err
+		}
+
+		if err := r.client.Delete(context.TODO(), pvc); err != nil {
+			return reconcile.Result{}, err
+		}
 		return reconcile.Result{}, nil
 	}
 	return reconcile.Result{}, nil
 }
 
-// func (r *SmartCloneReconciler) updateSmartCloneStatusPhase(phase cdiv1.DataVolumePhase, dataVolume *cdiv1.DataVolume, newPVC *corev1.PersistentVolumeClaim) error {
-// 	var dataVolumeCopy = dataVolume.DeepCopy()
-// 	var event DataVolumeEvent
+func (r *CSICloneReconciler) reconcileTargetPVC(log logr.Logger, pvc *corev1.PersistentVolumeClaim) (reconcile.Result, error) {
+	if pvc.Status.Phase == corev1.ClaimBound {
+		dv := &cdiv1.DataVolume{}
+		if err := r.client.Get(context.TODO(), types.NamespacedName{Name: metav1.GetControllerOf(pvc).Name, Namespace: pvc.Namespace}, dv); err != nil {
+			if k8serrors.IsNotFound(err) {
+				// Datavolume deleted
+				return reconcile.Result{}, nil
+			}
+			return reconcile.Result{}, err
+		}
 
-// 	switch phase {
-// 	case cdiv1.SmartClonePVCInProgress:
-// 		dataVolumeCopy.Status.Phase = cdiv1.SmartClonePVCInProgress
-// 		event.eventType = corev1.EventTypeNormal
-// 		event.reason = SmartClonePVCInProgress
-// 		event.message = fmt.Sprintf(MessageSmartClonePVCInProgress, dataVolumeCopy.Spec.Source.PVC.Namespace, dataVolumeCopy.Spec.Source.PVC.Name)
-// 		dataVolume.Status.Conditions = updateBoundCondition(dataVolume.Status.Conditions, newPVC)
-// 		dataVolume.Status.Conditions = updateReadyCondition(dataVolume.Status.Conditions, corev1.ConditionFalse, "", "")
-// 		dataVolume.Status.Conditions = updateCondition(dataVolume.Status.Conditions, cdiv1.DataVolumeRunning, corev1.ConditionTrue, MessageSmartClonePVCInProgress, SmartClonePVCInProgress)
-// 	case cdiv1.Succeeded:
-// 		dataVolumeCopy.Status.Phase = cdiv1.Succeeded
-// 		event.eventType = corev1.EventTypeNormal
-// 		event.reason = CloneSucceeded
-// 		event.message = fmt.Sprintf(MessageCloneSucceeded, dataVolumeCopy.Spec.Source.PVC.Namespace, dataVolumeCopy.Spec.Source.PVC.Name, newPVC.Namespace, newPVC.Name)
-// 		dataVolume.Status.Conditions = updateBoundCondition(dataVolume.Status.Conditions, newPVC)
-// 		dataVolume.Status.Conditions = updateReadyCondition(dataVolume.Status.Conditions, corev1.ConditionTrue, "", "")
-// 		dataVolume.Status.Conditions = updateCondition(dataVolume.Status.Conditions, cdiv1.DataVolumeRunning, corev1.ConditionFalse, cloneComplete, "Completed")
-// 	}
+		if err := r.updateDVStatus(cdiv1.PVCBound, dv); err != nil {
+			return reconcile.Result{}, err
+		}
+		return reconcile.Result{}, nil
+	}
+	return reconcile.Result{}, nil
+}
 
-// 	return r.emitEvent(dataVolume, dataVolumeCopy, &event, newPVC)
-// }
+func (r *CSICloneReconciler) updateDVStatus(phase cdiv1.DataVolumePhase, dataVolume *cdiv1.DataVolume) error {
+	var dataVolumeCopy = dataVolume.DeepCopy()
+	var event DataVolumeEvent
 
-// func (r *SmartCloneReconciler) emitEvent(dataVolume *cdiv1.DataVolume, dataVolumeCopy *cdiv1.DataVolume, event *DataVolumeEvent, newPVC *corev1.PersistentVolumeClaim) error {
-// 	// Only update the object if something actually changed in the status.
-// 	if !reflect.DeepEqual(dataVolume.Status, dataVolumeCopy.Status) {
-// 		if err := r.client.Update(context.TODO(), dataVolumeCopy); err == nil {
-// 			// Emit the event only when the status change happens, not every time
-// 			if event.eventType != "" {
-// 				r.recorder.Event(dataVolume, event.eventType, event.reason, event.message)
-// 			}
-// 		} else {
-// 			return err
-// 		}
-// 	}
-// 	return nil
-// }
+	switch phase {
+	case cdiv1.PVCBound:
+		dataVolumeCopy.Status.Phase = cdiv1.PVCBound
+	}
 
-// func newPvcFromSnapshot(snapshot *snapshotv1.VolumeSnapshot, dataVolume *cdiv1.DataVolume) *corev1.PersistentVolumeClaim {
-// 	labels := map[string]string{
-// 		"cdi-controller":         snapshot.Name,
-// 		common.CDILabelKey:       common.CDILabelValue,
-// 		common.CDIComponentLabel: common.SmartClonerCDILabel,
-// 	}
-// 	ownerRef := metav1.GetControllerOf(snapshot)
-// 	if ownerRef == nil {
-// 		return nil
-// 	}
-// 	annotations := make(map[string]string)
-// 	annotations[AnnSmartCloneRequest] = "true"
-// 	annotations[AnnCloneOf] = "true"
-// 	annotations[AnnRunningCondition] = string(corev1.ConditionFalse)
-// 	annotations[AnnRunningConditionMessage] = cloneComplete
-// 	annotations[AnnRunningConditionReason] = "Completed"
+	return r.emitEvent(dataVolume, dataVolumeCopy, &event)
+}
 
-// 	return &corev1.PersistentVolumeClaim{
-// 		ObjectMeta: metav1.ObjectMeta{
-// 			Name:            snapshot.Name,
-// 			Namespace:       snapshot.Namespace,
-// 			Labels:          labels,https://github.com/coreweave/k8s-services/issues/106
-// 			Annotations:     annotations,
-// 			OwnerReferences: []metav1.OwnerReference{*ownerRef},
-// 		},
-// 		Spec: corev1.PersistentVolumeClaimSpec{
-// 			DataSource: &corev1.TypedLocalObjectReference{
-// 				Name:     snapshot.Name,
-// 				Kind:     "VolumeSnapshot",
-// 				APIGroup: &snapshotv1.SchemeGroupVersion.Group,
-// 			},
-// 			VolumeMode:       dataVolume.Spec.PVC.VolumeMode,
-// 			AccessModes:      dataVolume.Spec.PVC.AccessModes,
-// 			StorageClassName: dataVolume.Spec.PVC.StorageClassName,
-// 			Resources: corev1.ResourceRequirements{
-// 				Requests: dataVolume.Spec.PVC.Resources.Requests,
-// 			},
-// 		},
-// 	}
-// }
+func (r *CSICloneReconciler) emitEvent(dataVolume *cdiv1.DataVolume, dataVolumeCopy *cdiv1.DataVolume, event *DataVolumeEvent) error {
+	// Only update the object if something actually changed in the status.
+	if !reflect.DeepEqual(dataVolume.Status, dataVolumeCopy.Status) {
+		if err := r.client.Update(context.TODO(), dataVolumeCopy); err == nil {
+			// Emit the event only when the status change happens, not every time
+			if event.eventType != "" {
+				r.recorder.Event(dataVolume, event.eventType, event.reason, event.message)
+			}
+		} else {
+			return err
+		}
+	}
+	return nil
+}
