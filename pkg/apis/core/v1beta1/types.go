@@ -233,8 +233,12 @@ const (
 
 	// ClonePVCNameInUse represents the phase in which the PVC in the source namespace used in the CSI clone process is unavailable
 	ClonePVCNameInUse DataVolumePhase = "ClonePVCNameAlreadyInUse"
+	// CloneSourcePVCLost represents the phase in which the PV for the source PVC was lost mid-clone process
+	CloneSourcePVLost DataVolumePhase = "CloneSourcePVLost"	
 	// CloneSourcePVCLost represents the phase in which the datavolume's source PVC no longer exists mid-clone process
 	CloneSourcePVCLost DataVolumePhase = "CloneSourcePVCLost"
+	// CloneTargetPVCLost represents the phase in which the datavolume's source PVC no longer exists mid-clone process
+	CloneTargetPVCLost DataVolumePhase = "CloneTargetPVCLost"
 	// CSICloneInProgress represents the phase in which the CSI clone process is pending completion
 	CSICloneInProgress DataVolumePhase = "CSICloneInProgress"
 

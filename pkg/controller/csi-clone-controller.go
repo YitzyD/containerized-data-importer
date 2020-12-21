@@ -127,7 +127,27 @@ func (r *CSICloneReconciler) Reconcile(req reconcile.Request) (reconcile.Result,
 	return reconcile.Result{}, nil
 }
 
+func verifyTargetPVC(targetPvc *corev1.PersistentVolumeClaim) error {
+	if(targetPvc.Status.Phase == corev1.ClaimLost) {
+		return fmt.Errorf("Target clone pvc claim lost")
+	}	else if(targetPvc.Status.Phase == corev1.ClaimPending) {
+		controllingDv := metav1.GetControllerOf(targetPvc)
+		if(controllingDv != nil && controllingDv.Kind != "DataVolume") {
+			return fmt.Errorf("Invalid controller for target clone pvc")
+		} else {
+			return nil
+		}
+	}
+	return nil
+}
+
 func (r *CSICloneReconciler) reconcileSourcePvc(log logr.Logger, pvc *corev1.PersistentVolumeClaim) (reconcile.Result, error) {
+	// Get DataVolume of PVC
+	dv := &cdiv1.DataVolume{}
+	if err := r.client.Get(context.TODO(), types.NamespacedName{Name: metav1.GetControllerOf(pvc).Name, Namespace: pvc.Annotations[AnnCSICloneDVNamespace]}, dv); err != nil {
+		return reconcile.Result{}, err
+	}
+
 	if pvc.Status.Phase == corev1.ClaimBound {
 		pv := &corev1.PersistentVolume{}
 		if err := r.client.Get(context.TODO(), types.NamespacedName{Name: pvc.Spec.VolumeName}, pv); err != nil {
@@ -136,6 +156,8 @@ func (r *CSICloneReconciler) reconcileSourcePvc(log logr.Logger, pvc *corev1.Per
 			}
 			return reconcile.Result{}, err
 		}
+		// Deep copy pv object for mutation
+		pvCopy := pv.DeepCopy()
 
 		dv := &cdiv1.DataVolume{}
 		if err := r.client.Get(context.TODO(), types.NamespacedName{Name: metav1.GetControllerOf(pvc).Name, Namespace: pvc.Annotations[AnnCSICloneDVNamespace]}, dv); err != nil {
@@ -148,7 +170,10 @@ func (r *CSICloneReconciler) reconcileSourcePvc(log logr.Logger, pvc *corev1.Per
 
 		if err := r.client.Create(context.TODO(), targetClonerPvc); err != nil {
 			if k8serrors.IsAlreadyExists(err) {
-				return reconcile.Result{}, nil
+				if(verifyTargetPVC(targetClonerPvc) == nil) {
+					// Target clone pvc already exists, and is valid; delete Source clone PVC
+					return reconcile.Result{}, r.client.Delete(context.TODO(), pvc)
+			}
 			}
 			return reconcile.Result{}, err
 		}
@@ -167,6 +192,30 @@ func (r *CSICloneReconciler) reconcileSourcePvc(log logr.Logger, pvc *corev1.Per
 			return reconcile.Result{}, err
 		}
 		return reconcile.Result{}, nil
+	} else if pvc.Status.Phase == corev1.ClaimLost {
+		// If Source pvc claim is lost
+		// Verify if target clone pvc valid
+		targetClonerPvc := NewVolumeClonePVC(dv, *pvc.Spec.StorageClassName, pvc.Spec.AccessModes, CSICloneTargetPVC)
+		targetPvc := &corev1.PersistentVolumeClaim{}
+		if err := r.client.Get(context.TODO(), types.NamespacedName{Name: targetClonerPvc.Name, Namespace: targetClonerPvc.Namespace}, targetPvc); err != nil {
+			if(k8serrors.IsNotFound(err)) {
+				// Target clone pvc was either not created, or delete during cloning process
+				// Set dv err status CloneSourcePVLost
+				return reconcile.Result{}, r.updateDVStatus(cdiv1.CloneSourcePVLost, dv)
+			}
+			// Unable to get Target clone pvc for other reason; Requeue with error
+			return reconcile.Result{}, err
+		}
+		if(verifyTargetPVC(targetPvc) != nil) {
+			// Target clone pvc is not valid
+			// Set dv err status CloneSourcePVLost
+			return reconcile.Result{}, r.updateDVStatus(cdiv1.CloneSourcePVLost, dv)
+		} else {
+			// Target clone pvc successfully created, delete Source clone pvc
+			if err := r.client.Delete(context.TODO(), pvc); err != nil {
+				return reconcile.Result{}, err
+			}
+		}
 	}
 	return reconcile.Result{}, nil
 }
@@ -195,6 +244,16 @@ func (r *CSICloneReconciler) updateDVStatus(phase cdiv1.DataVolumePhase, dataVol
 	var event DataVolumeEvent
 
 	switch phase {
+	case cdiv1.CloneSourcePVLost:
+		dataVolumeCopy.Status.Phase = cdiv1.CloneSourcePVLost
+		event.eventType = corev1.EventTypeWarning
+		event.reason = string(cdiv1.CloneSourcePVLost)
+		event.message = "Source PVC lost its PV binding during the cloning process."
+	case cdiv1.CloneTargetPVCLost:
+		dataVolumeCopy.Status.Phase = cdiv1.CloneTargetPVCLost
+		event.eventType = corev1.EventTypeWarning
+		event.reason = string(cdiv1.CloneTargetPVCLost)
+		event.message = fmt.Sprintf("Target PVC %s lost during the cloning process.", dataVolume.Name)
 	case cdiv1.PVCBound:
 		dataVolumeCopy.Status.Phase = cdiv1.PVCBound
 	}
