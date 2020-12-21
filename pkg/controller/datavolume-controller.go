@@ -385,10 +385,7 @@ func (r *DatavolumeReconciler) Reconcile(req reconcile.Request) (reconcile.Resul
 			pvcClashControllerRef := metav1.GetControllerOf(pvcClash)
 
 			if pvcClash.Name == sourceClonerPvc.Name && pvcClash.Namespace == sourceClonerPvc.Namespace && !reflect.DeepEqual(pvcControllerRef, pvcClashControllerRef) {
-				if err := r.updateCSICloneDataVolumeStatus(cdiv1.ClonePVCNameInUse, datavolume); err != nil {
-					return reconcile.Result{}, err
-				}
-				return reconcile.Result{}, nil
+				return reconcile.Result{}, r.updateCSICloneDataVolumeStatus(cdiv1.ClonePVCNameInUse, datavolume)
 			}
 
 			if err := r.client.Create(context.TODO(), sourceClonerPvc); err != nil {
@@ -717,12 +714,12 @@ func (r *DatavolumeReconciler) updateCSICloneDataVolumeStatus(phase cdiv1.DataVo
 		dvCopy.Status.Phase = cdiv1.ClonePVCNameInUse
 		event.eventType = corev1.EventTypeWarning
 		event.reason = string(cdiv1.ClonePVCNameInUse)
-		event.message = fmt.Sprintf("Datavolume unable to create cloning PVC in target namespace using name %s.", dataVolume.Name) //TODO: move message to const
+		event.message = fmt.Sprintf("Datavolume unable to create cloning PVC in target namespace using name %s.", dataVolume.Name)
 	case cdiv1.CSICloneInProgress:
 		dvCopy.Status.Phase = cdiv1.CSICloneInProgress
 		event.eventType = corev1.EventTypeNormal
 		event.reason = string(cdiv1.CSICloneInProgress)
-		event.message = "CSI clone in progress. Creating clone PVC" //TODO: move message to const
+		event.message = "CSI clone in progress. Creating clone PVC"
 	case cdiv1.CloneSourcePVCLost:
 		dvCopy.Status.Phase = cdiv1.CloneSourcePVCLost
 		event.eventType = corev1.EventTypeWarning

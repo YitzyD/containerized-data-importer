@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"fmt"
 	"context"
 	"reflect"
 	"strconv"
@@ -28,15 +29,18 @@ import (
 )
 
 const (
-	AnnCSICloneRequest     = "cdi.kubevirt.io/CSICloneRequest"
-	AnnCSICloneDVNamespace = "cdi.kubevirt.io/CSICloneDVNamespace"
-	AnnCSICloneSource      = "cdi.kubevirt.io/CSICloneSource"
-	AnnCSICloneTarget      = "cdi.kubevirt.io/CSICloneTarget"
-	AnnCSICloneCapable     = "cdi.kubevirt.io/CSICloneVolumeCapable"
+	AnnCSICloneRequest     = "cdi.kubevirt.io/CSICloneRequest" 					// Annotation associating object with CSI Clone
+	AnnCSICloneDVNamespace = "cdi.kubevirt.io/CSICloneDVNamespace" 			// Annotation denoting the namespace of the associated datavolume for use by the source PVC
+	AnnCSICloneSource      = "cdi.kubevirt.io/CSICloneSource" 					// Annotation to represent the source cloning PVC ("true"/"false")
+	AnnCSICloneTarget      = "cdi.kubevirt.io/CSICloneTarget" 					// Annotation to represent the target cloning PVC ("true"/"false")
+	AnnCSICloneCapable     = "cdi.kubevirt.io/CSICloneVolumeCapable"		// Annotation for the target storageClass denoting whether the underlying CSI Driver supports CSI Volume Cloning ("true"/"false") 
+																																			// This must be set by a cluster admin on a per storageClass basis
+																																			// See https://kubernetes-csi.github.io/docs/volume-cloning.html for details 
 )
 
 type CSIClonePVCType string
 
+// Enum for PVC types used in CSI Cloning
 const (
 	CSICloneSourcePVC CSIClonePVCType = AnnCSICloneSource
 	CSICloneTargetPVC CSIClonePVCType = AnnCSICloneTarget
@@ -98,8 +102,10 @@ func shouldReconcileCSIClonePvc(pvc *corev1.PersistentVolumeClaim) bool {
 		return false
 	}
 
+	controllingDv := metav1.GetControllerOf(pvc)
+
 	val, ok := pvc.Annotations[AnnCSICloneRequest]
-	return ok && val == "true"
+	return ok && val == "true" && (controllingDv != nil && controllingDv.Kind == "DataVolume")
 }
 
 // Reconcile the reconcile loop for csi cloning.
@@ -117,10 +123,12 @@ func (r *CSICloneReconciler) Reconcile(req reconcile.Request) (reconcile.Result,
 	isCloneTarget := pvc.Annotations[AnnCSICloneTarget]
 
 	if s, err := strconv.ParseBool(isCloneSource); s && err == nil {
+		// Reconciling the Source PVC
 		return r.reconcileSourcePvc(log, pvc)
 	}
 
 	if s, err := strconv.ParseBool(isCloneTarget); s && err == nil {
+		// Reconciling the Target PVC
 		return r.reconcileTargetPVC(log, pvc)
 	}
 
@@ -149,6 +157,7 @@ func (r *CSICloneReconciler) reconcileSourcePvc(log logr.Logger, pvc *corev1.Per
 	}
 
 	if pvc.Status.Phase == corev1.ClaimBound {
+		// Get PV bound to source clone PVC
 		pv := &corev1.PersistentVolume{}
 		if err := r.client.Get(context.TODO(), types.NamespacedName{Name: pvc.Spec.VolumeName}, pv); err != nil {
 			if k8serrors.IsNotFound(err) {
@@ -159,35 +168,34 @@ func (r *CSICloneReconciler) reconcileSourcePvc(log logr.Logger, pvc *corev1.Per
 		// Deep copy pv object for mutation
 		pvCopy := pv.DeepCopy()
 
-		dv := &cdiv1.DataVolume{}
-		if err := r.client.Get(context.TODO(), types.NamespacedName{Name: metav1.GetControllerOf(pvc).Name, Namespace: pvc.Annotations[AnnCSICloneDVNamespace]}, dv); err != nil {
-			return reconcile.Result{}, err
-		}
-
+		// Build new Target clone pvc
 		targetClonerPvc := NewVolumeClonePVC(dv, *pvc.Spec.StorageClassName, pvc.Spec.AccessModes, CSICloneTargetPVC)
+		// Set target clone pvc volumeName to PV of source clone PVC
+		targetClonerPvc.Spec.VolumeName = pvCopy.Name
 
-		targetClonerPvc.Spec.VolumeName = pv.Name
-
+		// Create Target clone pvc
 		if err := r.client.Create(context.TODO(), targetClonerPvc); err != nil {
 			if k8serrors.IsAlreadyExists(err) {
 				if(verifyTargetPVC(targetClonerPvc) == nil) {
 					// Target clone pvc already exists, and is valid; delete Source clone PVC
 					return reconcile.Result{}, r.client.Delete(context.TODO(), pvc)
-			}
+				}
 			}
 			return reconcile.Result{}, err
 		}
 
+		// Get ObjectReference of target Clone PVC for PV ClaimRef  
 		claimRef, err := ref.GetReference(r.scheme, targetClonerPvc)
 		if err != nil {
 			return reconcile.Result{}, err
 		}
-
-		pv.Spec.ClaimRef = claimRef
-		if err := r.client.Update(context.TODO(), pv); err != nil {
+		// Set and update ClaimRef of PV to Target clone pvc
+		pvCopy.Spec.ClaimRef = claimRef
+		if err := r.client.Update(context.TODO(), pvCopy); err != nil {
 			return reconcile.Result{}, err
 		}
 
+		// Delete Source clone pvc
 		if err := r.client.Delete(context.TODO(), pvc); err != nil {
 			return reconcile.Result{}, err
 		}
@@ -228,13 +236,8 @@ func (r *CSICloneReconciler) reconcileTargetPVC(log logr.Logger, pvc *corev1.Per
 				// Datavolume deleted
 				return reconcile.Result{}, nil
 			}
-			return reconcile.Result{}, err
 		}
-
-		if err := r.updateDVStatus(cdiv1.PVCBound, dv); err != nil {
-			return reconcile.Result{}, err
-		}
-		return reconcile.Result{}, nil
+		return reconcile.Result{}, r.updateDVStatus(cdiv1.PVCBound, dv)
 	}
 	return reconcile.Result{}, nil
 }
