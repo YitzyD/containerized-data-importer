@@ -74,6 +74,7 @@ go_test(
         "datavolume-controller_test.go",
         "import-controller_test.go",
         "smart-clone-controller_test.go",
+        "csi-clone-controller_test.go",
         "upload-controller_test.go",
         "util_test.go",
     ],
