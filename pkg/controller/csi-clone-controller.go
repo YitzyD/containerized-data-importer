@@ -105,7 +105,8 @@ func shouldReconcileCSIClonePvc(pvc *corev1.PersistentVolumeClaim) bool {
 	controllingDv := metav1.GetControllerOf(pvc)
 
 	val, ok := pvc.Annotations[AnnCSICloneRequest]
-	return ok && val == "true" && (controllingDv != nil && controllingDv.Kind == "DataVolume")
+	isCSICloneRequest, _ := strconv.ParseBool(val)
+	return ok && isCSICloneRequest && (controllingDv != nil && controllingDv.Kind == "DataVolume")
 }
 
 // Reconcile the reconcile loop for csi cloning.
