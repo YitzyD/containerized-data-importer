@@ -109,7 +109,7 @@ func shouldReconcileCSIClonePvc(pvc *corev1.PersistentVolumeClaim) bool {
 	return ok && isCSICloneRequest && (controllingDv != nil && controllingDv.Kind == "DataVolume")
 }
 
-// Reconcile the reconcile loop for csi cloning.
+// Reconcile the reconcile loop for csi cloning
 func (r *CSICloneReconciler) Reconcile(req reconcile.Request) (reconcile.Result, error) {
 	log := r.log.WithValues("PVC", req.NamespacedName)
 	log.Info("reconciling csi clone")

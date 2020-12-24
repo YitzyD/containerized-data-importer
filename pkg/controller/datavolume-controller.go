@@ -224,7 +224,6 @@ func (r *DatavolumeReconciler) isCSICloneCapable(dv *cdiv1.DataVolume) (bool, er
 	if dv.Spec.Source.PVC == nil {
 		return false, nil
 	}
-
 	sourcePvcNs := dv.Spec.Source.PVC.Namespace
 	if sourcePvcNs == "" {
 		sourcePvcNs = dv.Namespace
@@ -239,7 +238,7 @@ func (r *DatavolumeReconciler) isCSICloneCapable(dv *cdiv1.DataVolume) (bool, er
 
 	sourcePvcStorageClassName := sourcePvc.Spec.StorageClassName
 	targetStorageClass, err := GetStorageClassByName(r.client, dv.Spec.PVC.StorageClassName)
-	if err != nil {
+	if err != nil || targetStorageClass == nil {
 		return false, err
 	}
 
@@ -250,6 +249,7 @@ func (r *DatavolumeReconciler) isCSICloneCapable(dv *cdiv1.DataVolume) (bool, er
 	}
 
 	ann := targetStorageClass.Annotations[AnnCSICloneCapable]
+
 	if s, err := strconv.ParseBool(ann); s && err == nil {
 		return true, nil
 	}
@@ -259,6 +259,9 @@ func (r *DatavolumeReconciler) isCSICloneCapable(dv *cdiv1.DataVolume) (bool, er
 
 func NewVolumeClonePVC(dv *cdiv1.DataVolume, pvcStorageClassName string, pvcAccessModes []corev1.PersistentVolumeAccessMode, csiClonePvcType CSIClonePVCType) *corev1.PersistentVolumeClaim {
 	annotations := make(map[string]string)
+	for ann, v := range dv.GetAnnotations() {
+		annotations[ann] = v
+	}
 	annotations[AnnCSICloneRequest] = "true"
 	labels := map[string]string{
 		common.CDILabelKey:       common.CDILabelValue,
@@ -358,7 +361,7 @@ func (r *DatavolumeReconciler) Reconcile(req reconcile.Request) (reconcile.Resul
 	}
 
 	// Check if CSIClone is possible
-	if isCap, err := r.isCSICloneCapable(datavolume); isCap && datavolume.Spec.PVC != nil && err == nil {
+	if isCSICap, err := r.isCSICloneCapable(datavolume); isCSICap && datavolume.Spec.PVC != nil && err == nil {
 		if !pvcExists {
 			sourcePvcNs := datavolume.Spec.Source.PVC.Namespace
 			if sourcePvcNs == "" {

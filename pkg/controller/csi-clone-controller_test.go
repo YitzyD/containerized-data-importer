@@ -42,6 +42,7 @@ var (
 					corev1.ResourceStorage: mockStorageSize,
 				},
 			},
+			StorageClassName: &mockStorageClassName,
 		},
 	}
 	mockDv = cdiv1.DataVolume{
@@ -138,19 +139,19 @@ var _ = Describe("CSI-clone reconcile loop", func() {
 	})
 
 	It("should return nil if the pvc is not found", func() {
-		reconciler := createCSICloneReconciler()
+		reconciler = createCSICloneReconciler()
 		_, err := reconciler.Reconcile(reconcile.Request{NamespacedName: types.NamespacedName{Name: "no-pvc", Namespace: "default"}})
 		Expect(err).ToNot(HaveOccurred())
 	})
 	It("should return nil if the pvc is neither annotated AnnCSICloneSource or AnnCSICloneTarget", func() {
-		reconciler := createCSICloneReconciler(mockSourcePvc.DeepCopy())
+		reconciler = createCSICloneReconciler(mockSourcePvc.DeepCopy())
 		_, err := reconciler.Reconcile(reconcile.Request{NamespacedName: types.NamespacedName{Name: mockSourcePvc.Name, Namespace: mockSourcePvc.Namespace}})
 		Expect(err).ToNot(HaveOccurred())
 	})
 
 	Context("when a AnnCSICloneSource annotated PVC is reconciled", func() {
 		It("should return an error if the datavolume is not found", func() {
-			reconciler := createCSICloneReconciler(mockSourceClonePvc.DeepCopy())
+			reconciler = createCSICloneReconciler(mockSourceClonePvc.DeepCopy())
 			_, err := reconciler.Reconcile(reconcile.Request{NamespacedName: types.NamespacedName{Name: mockSourceClonePvc.Name, Namespace: mockSourceClonePvc.Namespace}})
 			Expect(err).To(HaveOccurred())
 		})
@@ -158,7 +159,7 @@ var _ = Describe("CSI-clone reconcile loop", func() {
 			unboundSourceClonePvc := mockSourceClonePvc.DeepCopy()
 			unboundSourceClonePvc.Status.Phase = corev1.ClaimPending
 			unboundSourceClonePvc.Spec.VolumeName = ""
-			reconciler := createCSICloneReconciler(unboundSourceClonePvc, mockDv.DeepCopy())
+			reconciler = createCSICloneReconciler(unboundSourceClonePvc, mockDv.DeepCopy())
 			_, err := reconciler.Reconcile(reconcile.Request{NamespacedName: types.NamespacedName{Name: mockSourceClonePvc.Name, Namespace: mockSourceClonePvc.Namespace}})
 			Expect(err).ToNot(HaveOccurred())
 		})
@@ -170,7 +171,7 @@ var _ = Describe("CSI-clone reconcile loop", func() {
 			})
 
 			It("should update datavolume to CloneSourcePVLost if target clone pvc does not exist", func() {
-				reconciler := createCSICloneReconciler(claimLostSourceClonePvc, mockDv.DeepCopy())
+				reconciler = createCSICloneReconciler(claimLostSourceClonePvc, mockDv.DeepCopy())
 				_, err := reconciler.Reconcile(reconcile.Request{NamespacedName: types.NamespacedName{Name: mockSourceClonePvc.Name, Namespace: mockSourceClonePvc.Namespace}})
 				Expect(err).ToNot(HaveOccurred())
 				By("checking datavolume phase")
@@ -181,7 +182,7 @@ var _ = Describe("CSI-clone reconcile loop", func() {
 			It("should update datavolume to CloneSourcePVLost if target clone pvc is invalid", func() {
 				claimLostTargetPvc := mockTargetClonePvc.DeepCopy()
 				claimLostTargetPvc.Status.Phase = corev1.ClaimLost
-				reconciler := createCSICloneReconciler(claimLostSourceClonePvc, claimLostTargetPvc, mockDv.DeepCopy())
+				reconciler = createCSICloneReconciler(claimLostSourceClonePvc, claimLostTargetPvc, mockDv.DeepCopy())
 				_, err := reconciler.Reconcile(reconcile.Request{NamespacedName: types.NamespacedName{Name: mockSourceClonePvc.Name, Namespace: mockSourceClonePvc.Namespace}})
 				Expect(err).ToNot(HaveOccurred())
 				By("checking datavolume phase")
@@ -190,7 +191,7 @@ var _ = Describe("CSI-clone reconcile loop", func() {
 				Expect(dv.Status.Phase).To(Equal(cdiv1.CloneSourcePVLost))
 			})
 			It("should delete the source clone pvc if clone pvc is valid", func() {
-				reconciler := createCSICloneReconciler(claimLostSourceClonePvc, mockTargetClonePvc.DeepCopy(), mockDv.DeepCopy())
+				reconciler = createCSICloneReconciler(claimLostSourceClonePvc, mockTargetClonePvc.DeepCopy(), mockDv.DeepCopy())
 				_, err := reconciler.Reconcile(reconcile.Request{NamespacedName: types.NamespacedName{Name: mockSourceClonePvc.Name, Namespace: mockSourceClonePvc.Namespace}})
 				Expect(err).ToNot(HaveOccurred())
 				By("attempting to get source clone pvc")
@@ -212,19 +213,19 @@ var _ = Describe("CSI-clone reconcile loop", func() {
 			})
 
 			It("should return an error if the pv cannot be found", func() {
-				reconciler := createCSICloneReconciler(mockDv.DeepCopy(), boundSourcePvc)
+				reconciler = createCSICloneReconciler(mockDv.DeepCopy(), boundSourcePvc)
 				_, err := reconciler.Reconcile(reconcile.Request{NamespacedName: types.NamespacedName{Name: boundSourcePvc.Name, Namespace: boundSourcePvc.Namespace}})
 				Expect(k8serrors.IsNotFound(err)).To(BeTrue())
 			})
 			It("should return an error if the target clone PVC already exists and it is not valid", func() {
 				invalidTargetPvc := mockTargetClonePvc.DeepCopy()
 				invalidTargetPvc.OwnerReferences = []metav1.OwnerReference{}
-				reconciler := createCSICloneReconciler(mockDv.DeepCopy(), boundSourcePvc, invalidTargetPvc, mockPv.DeepCopy())
+				reconciler = createCSICloneReconciler(mockDv.DeepCopy(), boundSourcePvc, invalidTargetPvc, mockPv.DeepCopy())
 				_, err := reconciler.Reconcile(reconcile.Request{NamespacedName: types.NamespacedName{Name: boundSourcePvc.Name, Namespace: boundSourcePvc.Namespace}})
 				Expect(k8serrors.IsAlreadyExists(err)).To(BeTrue())
 			})
 			It("should return nil and delete the source clone pvc if the target clone PVC already exists and it is valid", func() {
-				reconciler := createCSICloneReconciler(mockDv.DeepCopy(), boundSourcePvc, boundTargetPvc, mockPv.DeepCopy())
+				reconciler = createCSICloneReconciler(mockDv.DeepCopy(), boundSourcePvc, boundTargetPvc, mockPv.DeepCopy())
 				_, err := reconciler.Reconcile(reconcile.Request{NamespacedName: types.NamespacedName{Name: boundSourcePvc.Name, Namespace: boundSourcePvc.Namespace}})
 				Expect(err).ToNot(HaveOccurred())
 				By("attempting to get source clone pvc")
@@ -233,7 +234,7 @@ var _ = Describe("CSI-clone reconcile loop", func() {
 				Expect(k8serrors.IsNotFound(err)).To(BeTrue())
 			})
 			It("should return nil and create a target clone pvc if it does not exist", func() {
-				reconciler := createCSICloneReconciler(mockDv.DeepCopy(), boundSourcePvc, mockPv.DeepCopy())
+				reconciler = createCSICloneReconciler(mockDv.DeepCopy(), boundSourcePvc, mockPv.DeepCopy())
 				_, err := reconciler.Reconcile(reconcile.Request{NamespacedName: types.NamespacedName{Name: boundSourcePvc.Name, Namespace: boundSourcePvc.Namespace}})
 				Expect(err).ToNot(HaveOccurred())
 				By("checking the created target pvc")
@@ -256,21 +257,21 @@ var _ = Describe("CSI-clone reconcile loop", func() {
 	})
 	Context("when a AnnCSICloneTarget annotated PVC is reconciled", func() {
 		It("should return nil if the claim is not yet bound", func() {
-			reconciler := createCSICloneReconciler(mockTargetClonePvc.DeepCopy())
+			reconciler = createCSICloneReconciler(mockTargetClonePvc.DeepCopy())
 			_, err := reconciler.Reconcile(reconcile.Request{NamespacedName: types.NamespacedName{Name: mockTargetClonePvc.Name, Namespace: mockTargetClonePvc.Namespace}})
 			Expect(err).ToNot(HaveOccurred())
 		})
 		It("should return nil if the claim is bound but the datavolume cannot be found", func() {
 			boundTargetPvc := mockTargetClonePvc.DeepCopy()
 			boundTargetPvc.Status.Phase = corev1.ClaimBound
-			reconciler := createCSICloneReconciler(boundTargetPvc)
+			reconciler = createCSICloneReconciler(boundTargetPvc)
 			_, err := reconciler.Reconcile(reconcile.Request{NamespacedName: types.NamespacedName{Name: mockTargetClonePvc.Name, Namespace: mockTargetClonePvc.Namespace}})
 			Expect(err).ToNot(HaveOccurred())
 		})
 		It("should update the datavolume phase to PVCBound if the claim is bound", func() {
 			boundTargetPvc := mockTargetClonePvc.DeepCopy()
 			boundTargetPvc.Status.Phase = corev1.ClaimBound
-			reconciler := createCSICloneReconciler(boundTargetPvc, mockDv.DeepCopy())
+			reconciler = createCSICloneReconciler(boundTargetPvc, mockDv.DeepCopy())
 			_, err := reconciler.Reconcile(reconcile.Request{NamespacedName: types.NamespacedName{Name: mockTargetClonePvc.Name, Namespace: mockTargetClonePvc.Namespace}})
 			Expect(err).ToNot(HaveOccurred())
 			dv := &cdiv1.DataVolume{}
